@@ -10,7 +10,8 @@
     "db:seed": "tsx src/seed.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:unit": "vitest run tests/unit"
+    "test:unit": "vitest run tests/unit",
+    "test:local": "DATABASE_URL=postgresql://booking:booking@localhost:5433/booking_test prisma migrate deploy && DATABASE_URL=postgresql://booking:booking@localhost:5433/booking_test vitest run"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
