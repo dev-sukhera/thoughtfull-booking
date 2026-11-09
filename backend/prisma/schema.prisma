@@ -1,0 +1,167 @@
+// All instants are stored as timestamptz (UTC). Wall-clock values that only make
+// sense in a professional's own timezone (weekly hours, blocked dates) are stored
+// as plain minutes-of-day / calendar dates together with that timezone.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  MEMBER
+  PROFESSIONAL
+}
+
+enum BookingStatus {
+  BOOKED
+  CANCELLED
+  RESCHEDULED
+}
+
+enum ReminderKind {
+  BEFORE_24H
+  BEFORE_1H
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  CANCELLED
+  EXPIRED
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  role         Role
+  timezone     String
+  title        String?
+  bio          String?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  authSessions         AuthSession[]
+  availability         WeeklyAvailability[]
+  blockedDates         BlockedDate[]
+  memberBookings       Booking[]            @relation("MemberBookings")
+  professionalBookings Booking[]            @relation("ProfessionalBookings")
+  reminders            Reminder[]
+  notifications        Notification[]
+
+  @@map("users")
+}
+
+model AuthSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auth_sessions")
+}
+
+/// One working-hours range per weekday, in the professional's own timezone.
+model WeeklyAvailability {
+  id             String @id @default(uuid()) @db.Uuid
+  professionalId String @map("professional_id") @db.Uuid
+  /// ISO weekday: 1 = Monday ... 7 = Sunday
+  weekday        Int
+  /// Minutes after local midnight, e.g. 540 = 09:00
+  startMinute    Int    @map("start_minute")
+  /// Minutes after local midnight, exclusive end, up to 1440 (24:00)
+  endMinute      Int    @map("end_minute")
+
+  professional User @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+
+  @@unique([professionalId, weekday])
+  @@map("weekly_availability")
+}
+
+/// A whole calendar day (in the professional's timezone) with no availability.
+model BlockedDate {
+  id             String  @id @default(uuid()) @db.Uuid
+  professionalId String  @map("professional_id") @db.Uuid
+  /// YYYY-MM-DD in the professional's timezone
+  date           String  @db.VarChar(10)
+  reason         String?
+
+  professional User @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+
+  @@unique([professionalId, date])
+  @@map("blocked_dates")
+}
+
+/// Overlap rules are enforced by Postgres exclusion constraints added in the
+/// migration SQL (Prisma cannot express them): see bookings_no_professional_overlap
+/// and bookings_no_member_overlap.
+model Booking {
+  id                String        @id @default(uuid()) @db.Uuid
+  memberId          String        @map("member_id") @db.Uuid
+  professionalId    String        @map("professional_id") @db.Uuid
+  startsAt          DateTime      @map("starts_at") @db.Timestamptz(3)
+  endsAt            DateTime      @map("ends_at") @db.Timestamptz(3)
+  status            BookingStatus @default(BOOKED)
+  cancelledAt       DateTime?     @map("cancelled_at") @db.Timestamptz(3)
+  cancelledByRole   Role?         @map("cancelled_by_role")
+  rescheduledFromId String?       @unique @map("rescheduled_from_id") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  member          User       @relation("MemberBookings", fields: [memberId], references: [id])
+  professional    User       @relation("ProfessionalBookings", fields: [professionalId], references: [id])
+  rescheduledFrom Booking?   @relation("Reschedule", fields: [rescheduledFromId], references: [id])
+  rescheduledTo   Booking?   @relation("Reschedule")
+  reminders       Reminder[]
+
+  @@index([professionalId, startsAt])
+  @@index([memberId, startsAt])
+  @@map("bookings")
+}
+
+model Reminder {
+  id          String         @id @default(uuid()) @db.Uuid
+  bookingId   String         @map("booking_id") @db.Uuid
+  userId      String         @map("user_id") @db.Uuid
+  kind        ReminderKind
+  remindAt    DateTime       @map("remind_at") @db.Timestamptz(3)
+  status      ReminderStatus @default(PENDING)
+  processedAt DateTime?      @map("processed_at") @db.Timestamptz(3)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  booking      Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notification Notification?
+
+  @@unique([bookingId, userId, kind])
+  @@index([status, remindAt])
+  @@map("reminders")
+}
+
+model Notification {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// Set for reminder notifications; UNIQUE so a reminder can never produce two notifications.
+  reminderId String?   @unique @map("reminder_id") @db.Uuid
+  bookingId  String?   @map("booking_id") @db.Uuid
+  type       String
+  title      String
+  body       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  readAt     DateTime? @map("read_at") @db.Timestamptz(3)
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reminder Reminder? @relation(fields: [reminderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
